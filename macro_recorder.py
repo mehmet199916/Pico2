@@ -4,6 +4,7 @@ import threading
 import time
 import json
 import serial
+import serial.tools.list_ports
 import pynput
 from pynput import mouse, keyboard
 import os
@@ -13,7 +14,7 @@ class MacroRecorder:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Pico2 Macro Recorder")
-        self.root.geometry("600x500")
+        self.root.geometry("700x600")
         
         # Serial connection
         self.serial_port = None
@@ -39,8 +40,9 @@ class MacroRecorder:
         # Start listeners
         self.start_listeners()
         
-        # Try to connect to Pico2
-        self.connect_to_pico()
+        # Refresh ports and try to connect to Pico2
+        self.refresh_ports()
+        self.auto_connect()
     
     def setup_gui(self):
         """Setup the GUI interface."""
@@ -55,8 +57,13 @@ class MacroRecorder:
         self.status_label = ttk.Label(conn_frame, text="Status: Disconnected")
         self.status_label.grid(row=0, column=0, sticky=tk.W)
         
-        ttk.Button(conn_frame, text="Connect", command=self.connect_to_pico).grid(row=0, column=1, padx=(10, 0))
-        ttk.Button(conn_frame, text="Disconnect", command=self.disconnect_from_pico).grid(row=0, column=2, padx=(5, 0))
+        ttk.Label(conn_frame, text="Port:").grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
+        self.port_combo = ttk.Combobox(conn_frame, width=10)
+        self.port_combo.grid(row=1, column=1, padx=(5, 0), pady=(5, 0))
+        
+        ttk.Button(conn_frame, text="Refresh", command=self.refresh_ports).grid(row=1, column=2, padx=(5, 0), pady=(5, 0))
+        ttk.Button(conn_frame, text="Connect", command=self.connect_to_pico).grid(row=1, column=3, padx=(5, 0), pady=(5, 0))
+        ttk.Button(conn_frame, text="Disconnect", command=self.disconnect_from_pico).grid(row=1, column=4, padx=(5, 0), pady=(5, 0))
         
         # Recording frame
         rec_frame = ttk.LabelFrame(main_frame, text="Recording", padding="5")
@@ -71,6 +78,13 @@ class MacroRecorder:
         
         self.record_status = ttk.Label(rec_frame, text="Hold Alt and click to record")
         self.record_status.grid(row=1, column=0, columnspan=3, pady=(5, 0))
+        
+        # Recording feedback
+        self.last_click_label = ttk.Label(rec_frame, text="Last click: None", foreground="blue")
+        self.last_click_label.grid(row=2, column=0, columnspan=3, pady=(5, 0))
+        
+        self.click_counter_label = ttk.Label(rec_frame, text="Clicks recorded: 0", foreground="green")
+        self.click_counter_label.grid(row=3, column=0, columnspan=3, pady=(5, 0))
         
         # Macro management frame
         macro_frame = ttk.LabelFrame(main_frame, text="Macro Management", padding="5")
@@ -125,13 +139,39 @@ class MacroRecorder:
         self.log_text.see(tk.END)
         self.root.update_idletasks()
     
+    def refresh_ports(self):
+        """Refresh the list of available COM ports."""
+        ports = serial.tools.list_ports.comports()
+        port_names = [port.device for port in ports]
+        
+        self.port_combo['values'] = port_names
+        if port_names:
+            # Try to default to COM12 if available, otherwise first port
+            if 'COM12' in port_names:
+                self.port_combo.set('COM12')
+            else:
+                self.port_combo.set(port_names[0])
+        
+        self.log_message(f"Found {len(port_names)} COM ports: {', '.join(port_names) if port_names else 'None'}")
+    
+    def auto_connect(self):
+        """Try to auto-connect to Pico2."""
+        if self.port_combo.get():
+            self.connect_to_pico()
+    
     def connect_to_pico(self):
         """Connect to Pico2 via serial."""
+        selected_port = self.port_combo.get()
+        if not selected_port:
+            messagebox.showerror("Error", "Please select a COM port")
+            return
+        
         try:
             if self.serial_port:
                 self.serial_port.close()
             
-            self.serial_port = serial.Serial('COM12', 115200, timeout=1)
+            self.log_message(f"Attempting to connect to {selected_port}...")
+            self.serial_port = serial.Serial(selected_port, 115200, timeout=2)
             time.sleep(2)  # Give time for connection
             
             # Send ping to test connection
@@ -140,16 +180,16 @@ class MacroRecorder:
             
             if response == 'PONG':
                 self.serial_connected = True
-                self.status_label.config(text="Status: Connected to Pico2")
-                self.log_message("Connected to Pico2 successfully")
+                self.status_label.config(text=f"Status: Connected to {selected_port}")
+                self.log_message(f"Connected to Pico2 on {selected_port} successfully")
             else:
-                raise Exception(f"Unexpected response: {response}")
+                raise Exception(f"Unexpected response: '{response}' (expected 'PONG')")
                 
         except Exception as e:
             self.serial_connected = False
             self.status_label.config(text="Status: Connection Failed")
             self.log_message(f"Connection failed: {str(e)}")
-            messagebox.showerror("Connection Error", f"Failed to connect to Pico2 on COM12:\n{str(e)}")
+            messagebox.showerror("Connection Error", f"Failed to connect to Pico2 on {selected_port}:\n{str(e)}")
     
     def disconnect_from_pico(self):
         """Disconnect from Pico2."""
@@ -204,7 +244,17 @@ class MacroRecorder:
             }
             
             self.current_macro.append(action)
+            
+            # Update GUI feedback
+            click_info = f"Last click: {button_name.upper()} at ({x}, {y}) - {delay:.3f}s delay"
+            self.last_click_label.config(text=click_info)
+            self.click_counter_label.config(text=f"Clicks recorded: {len(self.current_macro)}")
             self.log_message(f"Recorded {button_name} click at ({x}, {y}) with {delay:.3f}s delay")
+            
+            # Visual feedback - briefly flash the record button
+            original_text = self.record_button.cget('text')
+            self.record_button.config(text="● RECORDED")
+            self.root.after(300, lambda: self.record_button.config(text=original_text))
             
             self.macro_start_time = current_time
     
@@ -223,6 +273,8 @@ class MacroRecorder:
             
             self.record_button.config(text="Stop Recording")
             self.record_status.config(text="Recording... (Hold Alt and click to record)")
+            self.last_click_label.config(text="Last click: None")
+            self.click_counter_label.config(text="Clicks recorded: 0")
             self.log_message(f"Started recording macro: {macro_name}")
         else:
             self.recording = False
@@ -233,8 +285,11 @@ class MacroRecorder:
                 self.macros[self.current_macro_name] = self.current_macro.copy()
                 self.update_macro_list()
                 self.log_message(f"Finished recording macro: {self.current_macro_name} ({len(self.current_macro)} actions)")
+                self.last_click_label.config(text=f"Macro '{self.current_macro_name}' saved with {len(self.current_macro)} clicks")
             else:
                 self.log_message("No actions recorded")
+                self.last_click_label.config(text="No clicks recorded")
+                self.click_counter_label.config(text="Clicks recorded: 0")
     
     def update_macro_list(self):
         """Update the macro list display."""
